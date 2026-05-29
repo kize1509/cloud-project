@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal bronze ingestion for Hacker News and raw X Kaggle uploads.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-computing-prj
+  Environment:
+    Type: String
+    Default: dev
+  AwsRegion:
+    Type: String
+    Default: ''
+    Description: Optional deployment region label supplied by CI.
+  DataLakeBucketName:
+    Type: String
+    Description: Existing data lake bucket from storage.yaml.
+  BronzePrefix:
+    Type: String
+    Default: bronze
+  DiscordWebhookParameterName:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|/.+
+    Description: SSM parameter name containing the Discord webhook URL. The webhook value is never committed.
+  HnScheduleExpression:
+    Type: String
+    Default: cron(15 2 * * ? *)
+  HnTargetDayOffset:
+    Type: Number
+    Default: 1
+  HackerNewsLambdaS3Bucket:
+    Type: String
+    Description: S3 bucket containing the packaged Hacker News Lambda artifact.
+  HackerNewsLambdaS3Key:
+    Type: String
+    Description: S3 key for the packaged Hacker News Lambda artifact.
+  XLambdaS3Bucket:
+    Type: String
+    Description: S3 bucket containing the packaged X ingestion Lambda artifact.
+  XLambdaS3Key:
+    Type: String
+    Description: S3 key for the packaged X ingestion Lambda artifact.
+
+Conditions:
+  HasDiscordWebhookParameter: !Not [!Equals [!Ref DiscordWebhookParameterName, '']]
+
+Resources:
+  HackerNewsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-hn-bronze-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-hn-bronze-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${BronzePrefix}/hackernews/*
+              - !If
+                - HasDiscordWebhookParameter
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordWebhookParameterName}
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  HackerNewsIngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-hackernews-bronze-ingest
+      Description: Ingests raw Hacker News items for the previous UTC day into bronze S3.
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt HackerNewsLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Code:
+        S3Bucket: !Ref HackerNewsLambdaS3Bucket
+        S3Key: !Ref HackerNewsLambdaS3Key
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucketName
+          BRONZE_PREFIX: !Ref BronzePrefix
+          DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
+          HN_TARGET_DAY_OFFSET: !Ref HnTargetDayOffset
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: AwsRegion
+          Value: !Ref AwsRegion
+
+  HackerNewsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${HackerNewsIngestFunction}
+      RetentionInDays: 14
+
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-hn-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-hn-scheduler-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt HackerNewsIngestFunction.Arn
+
+  HackerNewsDailySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-hackernews-daily-bronze
+      Description: Daily Hacker News raw bronze ingestion for the previous UTC day.
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: !Ref HnScheduleExpression
+      State: ENABLED
+      Target:
+        Arn: !GetAtt HackerNewsIngestFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: !Sub '{"source":"eventbridge-scheduler","project":"${ProjectName}","environment":"${Environment}"}'
+
+  XLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-x-bronze-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-x-bronze-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/incoming/x/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${BronzePrefix}/x/*
+              - !If
+                - HasDiscordWebhookParameter
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordWebhookParameterName}
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  XIngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-x-bronze-ingest
+      Description: Copies known raw X Kaggle uploads from incoming/x to immutable bronze prefixes.
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt XLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref XLambdaS3Bucket
+        S3Key: !Ref XLambdaS3Key
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucketName
+          BRONZE_PREFIX: !Ref BronzePrefix
+          DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: AwsRegion
+          Value: !Ref AwsRegion
+
+  XLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${XIngestFunction}
+      RetentionInDays: 14
+
+  XIncomingUploadRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-x-incoming-upload
+      Description: Routes incoming raw X uploads to the bronze ingestion Lambda.
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref DataLakeBucketName
+          object:
+            key:
+              - prefix: incoming/x/
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt XIngestFunction.Arn
+          Id: XIngestFunctionTarget
+
+  XEventBridgeInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref XIngestFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt XIncomingUploadRule.Arn
+
+Outputs:
+  HackerNewsFunctionName:
+    Value: !Ref HackerNewsIngestFunction
+  XIngestFunctionName:
+    Value: !Ref XIngestFunction
+  HackerNewsScheduleName:
+    Value: !Ref HackerNewsDailySchedule
+  XIncomingPrefix:
+    Value: incoming/x/
+  HackerNewsBronzePrefix:
+    Value: !Sub ${BronzePrefix}/hackernews/
+  XBronzePrefix:
+    Value: !Sub ${BronzePrefix}/x/
+

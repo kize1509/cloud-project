@@ -71,6 +71,7 @@ Resources:
                   - cloudformation:DescribeStackEvents
                   - cloudformation:DescribeStackResources
                   - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
                   - cloudformation:ListStackResources
                   - sts:GetCallerIdentity
                 Resource: '*'

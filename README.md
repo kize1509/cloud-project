@@ -1,6 +1,6 @@
 # cloud-project
 
-Bronze AWS ingestion for raw Hacker News data and raw X/Kaggle uploads.
+Bronze AWS ingestion and silver normalization for Hacker News and X/Kaggle datasets.
 
 ## Prerequisites
 
@@ -12,6 +12,7 @@ Bronze AWS ingestion for raw Hacker News data and raw X/Kaggle uploads.
   - `CFN_PROJECT_NAME`, default `cloud-computing-prj`
   - `CFN_ENVIRONMENT`, default `dev`
   - `HN_SCHEDULE_EXPRESSION`, default `cron(15 2 * * ? *)`
+  - `AWSWRANGLER_LAYER_ARN`, awswrangler Lambda layer for your region (required for silver deploy)
 
 Local shell defaults:
 
@@ -47,7 +48,7 @@ Set GitHub secret `AWS_ROLE_TO_ASSUME` to the stack output `RoleArn`.
 Push to `main`, or run the GitHub Action manually:
 
 ```text
-Actions -> Deploy Bronze CloudFormation -> Run workflow
+Actions -> Deploy CloudFormation -> Run workflow
 ```
 
 The workflow validates templates, runs tests, packages Lambdas, uploads artifacts, and deploys:
@@ -56,7 +57,14 @@ The workflow validates templates, runs tests, packages Lambdas, uploads artifact
 infra/cloudformation/network.yaml
 infra/cloudformation/storage.yaml
 infra/cloudformation/bronze.yaml
+infra/cloudformation/silver.yaml
 ```
+
+### Manual AWS setup (silver)
+
+1. Set GitHub variable `AWSWRANGLER_LAYER_ARN` to the [awswrangler Lambda layer ARN](https://aws-sdk-pandas.readthedocs.io/en/stable/install.html#aws-lambda-layer) for your Python 3.12 region.
+2. Optional Discord webhook in SSM; set `DISCORD_WEBHOOK_PARAMETER_NAME` in GitHub variables.
+3. Ensure bronze data exists before testing silver (HN invoke or X upload below). Silver Lambdas trigger automatically on new bronze S3 objects.
 
 ## Add A New Lambda
 
@@ -76,6 +84,7 @@ scripts/package_lambdas.sh
 
 ```text
 infra/cloudformation/bronze.yaml
+infra/cloudformation/silver.yaml
 ```
 
 Include the Lambda role, log group, function, trigger, permission, and output.
@@ -240,6 +249,30 @@ Observe here:
 ```bash
 aws s3 ls "s3://$DATA_LAKE_BUCKET/bronze/x/covid-tweets/raw/covid.csv"
 aws logs tail "/aws/lambda/$PROJECT-$ENV-x-bronze-ingest" --region "$AWS_REGION" --since 20m
+```
+
+## Test Silver
+
+Silver runs automatically when bronze files land in S3. To backfill existing bronze data, re-run bronze (HN invoke or re-upload X CSV to `incoming/x/...`).
+
+### Verify Parquet output
+
+```bash
+aws s3 ls "s3://$DATA_LAKE_BUCKET/silver/posts/" --recursive
+aws s3 ls "s3://$DATA_LAKE_BUCKET/silver/users/" --recursive
+aws logs tail "/aws/lambda/$PROJECT-$ENV-hackernews-silver-normalize" --region "$AWS_REGION" --since 30m
+aws logs tail "/aws/lambda/$PROJECT-$ENV-x-silver-normalize" --region "$AWS_REGION" --since 30m
+```
+
+### Manual silver deploy
+
+After packaging Lambdas, deploy the silver stack with the same artifact bucket keys used for bronze:
+
+```bash
+bash scripts/package_lambdas.sh build/lambda
+
+# Upload all four zips, then deploy silver.yaml with AwswranglerLayerArn=...
+# See deploy.yml silver stack step for full parameter list.
 ```
 
 ## Local Checks

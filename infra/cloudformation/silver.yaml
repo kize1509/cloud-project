@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Silver normalization for Hacker News and X Kaggle datasets.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-computing-prj
+  Environment:
+    Type: String
+    Default: dev
+  AwsRegion:
+    Type: String
+    Default: ''
+  DataLakeBucketName:
+    Type: String
+    Description: Existing data lake bucket from storage.yaml.
+  BronzePrefix:
+    Type: String
+    Default: bronze
+  SilverPrefix:
+    Type: String
+    Default: silver
+  DiscordWebhookParameterName:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|/.+
+  AwswranglerLayerArn:
+    Type: String
+    Description: Region-specific AWS SDK for pandas (awswrangler) Lambda layer ARN.
+  HackerNewsSilverLambdaS3Bucket:
+    Type: String
+  HackerNewsSilverLambdaS3Key:
+    Type: String
+  XSilverLambdaS3Bucket:
+    Type: String
+  XSilverLambdaS3Key:
+    Type: String
+
+Conditions:
+  HasDiscordWebhookParameter: !Not [!Equals [!Ref DiscordWebhookParameterName, '']]
+
+Resources:
+  HackerNewsSilverLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-hn-silver-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-hn-silver-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${BronzePrefix}/hackernews/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${SilverPrefix}/*
+              - !If
+                - HasDiscordWebhookParameter
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordWebhookParameterName}
+                - !Ref AWS::NoValue
+
+  HackerNewsSilverFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-hackernews-silver-normalize
+      Description: Normalizes raw Hacker News bronze JSON into silver Parquet tables.
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt HackerNewsSilverLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Layers:
+        - !Ref AwswranglerLayerArn
+      Code:
+        S3Bucket: !Ref HackerNewsSilverLambdaS3Bucket
+        S3Key: !Ref HackerNewsSilverLambdaS3Key
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucketName
+          BRONZE_PREFIX: !Ref BronzePrefix
+          SILVER_PREFIX: !Ref SilverPrefix
+          DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
+
+  HackerNewsSilverLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${HackerNewsSilverFunction}
+      RetentionInDays: 14
+
+  HackerNewsSilverBronzeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-hn-silver-bronze
+      Description: Normalizes new Hacker News bronze daily JSON files into silver Parquet.
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref DataLakeBucketName
+          object:
+            key:
+              - prefix: !Sub ${BronzePrefix}/hackernews/
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt HackerNewsSilverFunction.Arn
+          Id: HackerNewsSilverFunctionTarget
+
+  HackerNewsSilverInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref HackerNewsSilverFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HackerNewsSilverBronzeRule.Arn
+
+  XSilverLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-x-silver-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-x-silver-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${BronzePrefix}/x/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${SilverPrefix}/*
+              - !If
+                - HasDiscordWebhookParameter
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordWebhookParameterName}
+                - !Ref AWS::NoValue
+
+  XSilverFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-x-silver-normalize
+      Description: Normalizes raw X Kaggle CSV bronze files into silver Parquet tables.
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt XSilverLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 2048
+      Layers:
+        - !Ref AwswranglerLayerArn
+      Code:
+        S3Bucket: !Ref XSilverLambdaS3Bucket
+        S3Key: !Ref XSilverLambdaS3Key
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucketName
+          BRONZE_PREFIX: !Ref BronzePrefix
+          SILVER_PREFIX: !Ref SilverPrefix
+          DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
+
+  XSilverLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${XSilverFunction}
+      RetentionInDays: 14
+
+  XSilverBronzeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-x-silver-bronze
+      Description: Normalizes new X bronze CSV files into silver Parquet.
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref DataLakeBucketName
+          object:
+            key:
+              - prefix: !Sub ${BronzePrefix}/x/
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt XSilverFunction.Arn
+          Id: XSilverFunctionTarget
+
+  XSilverInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref XSilverFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt XSilverBronzeRule.Arn
+
+Outputs:
+  HackerNewsSilverFunctionName:
+    Value: !Ref HackerNewsSilverFunction
+  XSilverFunctionName:
+    Value: !Ref XSilverFunction
+  SilverPostsPrefix:
+    Value: !Sub ${SilverPrefix}/posts/
+  SilverUsersPrefix:
+    Value: !Sub ${SilverPrefix}/users/

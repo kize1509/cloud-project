@@ -1,0 +1,124 @@
+name: Deploy Bronze CloudFormation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - infra/cloudformation/**
+      - lambdas/**
+      - scripts/package_lambdas.sh
+      - .github/workflows/deploy.yml
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  CFN_PROJECT_NAME: ${{ vars.CFN_PROJECT_NAME || 'cloud-computing-prj' }}
+  CFN_ENVIRONMENT: ${{ vars.CFN_ENVIRONMENT || 'dev' }}
+  DISCORD_WEBHOOK_PARAMETER_NAME: ${{ vars.DISCORD_WEBHOOK_PARAMETER_NAME || '' }}
+  HN_SCHEDULE_EXPRESSION: ${{ vars.HN_SCHEDULE_EXPRESSION || 'cron(15 2 * * ? *)' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-${{ github.run_id }}
+
+      - name: Install IaC tooling
+        run: python -m pip install --upgrade cfn-lint
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Lint CloudFormation templates
+        run: cfn-lint --non-zero-exit-code error infra/cloudformation/*.yaml
+
+      - name: Validate CloudFormation templates
+        run: |
+          aws cloudformation validate-template --template-body file://infra/cloudformation/network.yaml
+          aws cloudformation validate-template --template-body file://infra/cloudformation/storage.yaml
+          aws cloudformation validate-template --template-body file://infra/cloudformation/bronze.yaml
+          aws cloudformation validate-template --template-body file://infra/cloudformation/github-oidc.yaml
+
+      - name: Deploy network stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-network" \
+            --template-file infra/cloudformation/network.yaml \
+            --parameter-overrides \
+              ProjectName="${CFN_PROJECT_NAME}" \
+              Environment="${CFN_ENVIRONMENT}" \
+            --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"
+
+      - name: Deploy storage stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-storage" \
+            --template-file infra/cloudformation/storage.yaml \
+            --parameter-overrides \
+              ProjectName="${CFN_PROJECT_NAME}" \
+              Environment="${CFN_ENVIRONMENT}" \
+            --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"
+
+      - name: Package Lambda artifacts
+        run: bash scripts/package_lambdas.sh build/lambda
+
+      - name: Upload Lambda artifacts
+        id: artifacts
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ARTIFACT_BUCKET="$(aws cloudformation describe-stacks \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-storage" \
+            --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue" \
+            --output text)"
+          DATA_LAKE_BUCKET="$(aws cloudformation describe-stacks \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-storage" \
+            --query "Stacks[0].Outputs[?OutputKey=='DataLakeBucketName'].OutputValue" \
+            --output text)"
+          HN_KEY="lambda-artifacts/${GITHUB_SHA}/hackernews_ingest.zip"
+          X_KEY="lambda-artifacts/${GITHUB_SHA}/x_ingest.zip"
+
+          aws s3 cp build/lambda/hackernews_ingest.zip "s3://${ARTIFACT_BUCKET}/${HN_KEY}"
+          aws s3 cp build/lambda/x_ingest.zip "s3://${ARTIFACT_BUCKET}/${X_KEY}"
+
+          {
+            echo "artifact_bucket=${ARTIFACT_BUCKET}"
+            echo "data_lake_bucket=${DATA_LAKE_BUCKET}"
+            echo "hn_key=${HN_KEY}"
+            echo "x_key=${X_KEY}"
+            echo "account_id=${ACCOUNT_ID}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy bronze stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-bronze" \
+            --template-file infra/cloudformation/bronze.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ProjectName="${CFN_PROJECT_NAME}" \
+              Environment="${CFN_ENVIRONMENT}" \
+              AwsRegion="${AWS_REGION}" \
+              DataLakeBucketName="${{ steps.artifacts.outputs.data_lake_bucket }}" \
+              BronzePrefix="bronze" \
+              DiscordWebhookParameterName="${DISCORD_WEBHOOK_PARAMETER_NAME}" \
+              HnScheduleExpression="${HN_SCHEDULE_EXPRESSION}" \
+              HnTargetDayOffset="1" \
+              HackerNewsLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
+              HackerNewsLambdaS3Key="${{ steps.artifacts.outputs.hn_key }}" \
+              XLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
+              XLambdaS3Key="${{ steps.artifacts.outputs.x_key }}" \
+            --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"

@@ -1,4 +1,4 @@
-name: Deploy Bronze CloudFormation
+name: Deploy CloudFormation
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ env:
   CFN_ENVIRONMENT: ${{ vars.CFN_ENVIRONMENT || 'dev' }}
   DISCORD_WEBHOOK_PARAMETER_NAME: ${{ vars.DISCORD_WEBHOOK_PARAMETER_NAME || '' }}
   HN_SCHEDULE_EXPRESSION: ${{ vars.HN_SCHEDULE_EXPRESSION || 'cron(15 2 * * ? *)' }}
+  AWSWRANGLER_LAYER_ARN: ${{ vars.AWSWRANGLER_LAYER_ARN }}
 
 jobs:
   deploy:
@@ -51,6 +52,7 @@ jobs:
           aws cloudformation validate-template --template-body file://infra/cloudformation/network.yaml
           aws cloudformation validate-template --template-body file://infra/cloudformation/storage.yaml
           aws cloudformation validate-template --template-body file://infra/cloudformation/bronze.yaml
+          aws cloudformation validate-template --template-body file://infra/cloudformation/silver.yaml
           aws cloudformation validate-template --template-body file://infra/cloudformation/github-oidc.yaml
 
       - name: Deploy network stack
@@ -90,15 +92,21 @@ jobs:
             --output text)"
           HN_KEY="lambda-artifacts/${GITHUB_SHA}/hackernews_ingest.zip"
           X_KEY="lambda-artifacts/${GITHUB_SHA}/x_ingest.zip"
+          HN_SILVER_KEY="lambda-artifacts/${GITHUB_SHA}/hackernews_silver.zip"
+          X_SILVER_KEY="lambda-artifacts/${GITHUB_SHA}/x_silver.zip"
 
           aws s3 cp build/lambda/hackernews_ingest.zip "s3://${ARTIFACT_BUCKET}/${HN_KEY}"
           aws s3 cp build/lambda/x_ingest.zip "s3://${ARTIFACT_BUCKET}/${X_KEY}"
+          aws s3 cp build/lambda/hackernews_silver.zip "s3://${ARTIFACT_BUCKET}/${HN_SILVER_KEY}"
+          aws s3 cp build/lambda/x_silver.zip "s3://${ARTIFACT_BUCKET}/${X_SILVER_KEY}"
 
           {
             echo "artifact_bucket=${ARTIFACT_BUCKET}"
             echo "data_lake_bucket=${DATA_LAKE_BUCKET}"
             echo "hn_key=${HN_KEY}"
             echo "x_key=${X_KEY}"
+            echo "hn_silver_key=${HN_SILVER_KEY}"
+            echo "x_silver_key=${X_SILVER_KEY}"
             echo "account_id=${ACCOUNT_ID}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -121,4 +129,25 @@ jobs:
               HackerNewsLambdaS3Key="${{ steps.artifacts.outputs.hn_key }}" \
               XLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
               XLambdaS3Key="${{ steps.artifacts.outputs.x_key }}" \
+            --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"
+
+      - name: Deploy silver stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-silver" \
+            --template-file infra/cloudformation/silver.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ProjectName="${CFN_PROJECT_NAME}" \
+              Environment="${CFN_ENVIRONMENT}" \
+              AwsRegion="${AWS_REGION}" \
+              DataLakeBucketName="${{ steps.artifacts.outputs.data_lake_bucket }}" \
+              BronzePrefix="bronze" \
+              SilverPrefix="silver" \
+              DiscordWebhookParameterName="${DISCORD_WEBHOOK_PARAMETER_NAME}" \
+              AwswranglerLayerArn="${AWSWRANGLER_LAYER_ARN}" \
+              HackerNewsSilverLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
+              HackerNewsSilverLambdaS3Key="${{ steps.artifacts.outputs.hn_silver_key }}" \
+              XSilverLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
+              XSilverLambdaS3Key="${{ steps.artifacts.outputs.x_silver_key }}" \
             --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"

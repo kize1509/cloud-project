@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 storage for bronze, silver, and gold data lake zones.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-computing-prj
+  Environment:
+    Type: String
+    Default: dev
+  DataLakeBucketName:
+    Type: String
+    Default: ''
+    Description: Optional explicit data lake bucket name.
+  ArtifactBucketName:
+    Type: String
+    Default: ''
+    Description: Optional explicit Lambda artifact bucket name.
+
+Conditions:
+  HasDataLakeBucketName: !Not [!Equals [!Ref DataLakeBucketName, '']]
+  HasArtifactBucketName: !Not [!Equals [!Ref ArtifactBucketName, '']]
+
+Resources:
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - HasDataLakeBucketName
+        - !Ref DataLakeBucketName
+        - !Sub ${ProjectName}-${Environment}-${AWS::AccountId}-${AWS::Region}-data-lake
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: BronzePrefix
+          Value: bronze
+        - Key: SilverPrefix
+          Value: silver
+        - Key: GoldPrefix
+          Value: gold
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - HasArtifactBucketName
+        - !Ref ArtifactBucketName
+        - !Sub ${ProjectName}-${Environment}-${AWS::AccountId}-${AWS::Region}-artifacts
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  DataLakeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataLakeBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt DataLakeBucket.Arn
+              - !Sub ${DataLakeBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub ${ArtifactBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  DataLakeBucketName:
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DataLakeBucketName
+  DataLakeBucketArn:
+    Value: !GetAtt DataLakeBucket.Arn
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-DataLakeBucketArn
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-ArtifactBucketName
+  BronzePrefix:
+    Value: bronze/
+  SilverPrefix:
+    Value: silver/
+  GoldPrefix:
+    Value: gold/
+  XIncomingPrefix:
+    Value: incoming/x/

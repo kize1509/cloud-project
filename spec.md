@@ -169,63 +169,76 @@ Use **both** Kaggle datasets — do **not** call the X API.
 
 Bronze data may be in different formats with different structures. Normalize to a **single format** and define a **data schema**. Without a schema, downstream queries cannot be written reliably.
 
-Implement a **Lambda function (or functions)** for normalization.
+**Implementation:** two Lambdas (`hackernews-silver-normalize`, `x-silver-normalize`), triggered by S3 `Object Created` events on bronze outputs. Writes **Parquet** via [awswrangler](https://aws-sdk-pandas.readthedocs.io/en/stable/) (+ [Lambda layer](https://aws-sdk-pandas.readthedocs.io/en/stable/install.html#aws-lambda-layer)).
 
 #### Normalization must include
 
-- **Flatten nested structures** — e.g. `kids` fields in Hacker News posts
-- **Align timestamps** — Hacker News uses Unix Epoch (`1736978058`); X uses ISO-8601 (`2026-01-15T21:54:18Z`). Normalize to a single **UTC** format
-- **Clean values** — e.g. strip HTML tags (`<p>`, `<i>`) from Hacker News content
-- **Remove duplicates**
-- **Any additional processing** you deem necessary beyond the above
-- **Establish schema** — define tables (dataframes) with columns and relationships
+- **Flatten nested structures** — HN `kids` are separate items in bronze JSON; normalize each item as its own post row; use `parent_id` on comments
+- **Align timestamps** — HN Unix epoch → UTC ISO-8601; X `date` / `user_created` parsed as UTC
+- **Clean values** — strip HTML tags from HN `title` / `text`
+- **Stable IDs** — HN `post_id = str(id)`; X `post_id = SHA-256` of canonical full CSV row
+- **User merge** — one row per `(platform, username)`; `user_id = UUID v5` from that pair
+- **Idempotent writes** — overwrite target Parquet partitions on re-run (no append dedup)
 
 **Schema rules:**
 - Minimize redundancy; aim for **3NF**
 - Save tables as **Parquet**, **partitioned**
-- Schema is **not fixed** — it may evolve if deficiencies are found; choose structure based on what data is useful
+- Partitioning example: https://aws-sdk-pandas.readthedocs.io/en/stable/tutorials/004%20-%20Parquet%20Datasets.html#Creating-a-Partitioned-Dataset
 
-**Recommended library:** [awswrangler](https://aws-sdk-pandas.readthedocs.io/en/stable/) (+ [Lambda layer](https://aws-sdk-pandas.readthedocs.io/en/stable/install.html#aws-lambda-layer))  
-**Partitioning example:** https://aws-sdk-pandas.readthedocs.io/en/stable/tutorials/004%20-%20Parquet%20Datasets.html#Creating-a-Partitioned-Dataset
+#### Silver schema (`users` + `posts`)
 
-#### Example schema (2 tables)
+**`users`** — partition key: `platform` (`HackerNews` | `X`)
 
-**`users`**
+| Column | Type | HN source | X source |
+|--------|------|-----------|----------|
+| `user_id` | UUID | UUID v5 from `(platform, username)` | same |
+| `username` | String | item `by` | `user_name` |
+| `platform` | String | `'Hacker News'` | `'X'` |
+| `karma_score` | Integer | HN user API | `null` |
+| `follower_count` | Integer | `null` | `user_followers` |
+| `is_verified` | Boolean | `null` | `user_verified` |
+| `created_at` | Timestamp | HN user API `created` | `user_created` |
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `user_id` | UUID | Generated ID |
-| `username` | String | From Hacker News or X |
-| `platform` | String | `'Hacker News'` or `'X'` |
-| `karma_score` | Integer | Hacker News reputation; `null` for X users |
-| `is_verified` | Boolean | X verification status; `null` for Hacker News users |
-| `created_at` | Timestamp | Normalized UTC ISO-8601 |
+**`posts`** — partition keys: `year`, `month`, `day` from `created_at`
 
-**`posts`**
+| Column | Type | HN source | X source |
+|--------|------|-----------|----------|
+| `post_id` | String | `str(id)` | SHA-256 hex of full CSV row |
+| `author_username` | String | `by` | `user_name` |
+| `platform` | String | `'Hacker News'` | `'X'` |
+| `content_text` | String | HTML-stripped `title` + `text` | `text` |
+| `created_at` | Timestamp | from `time` | from `date` |
+| `post_type` | String | `ask` if Ask HN story, else `type` | `retweet` or `tweet` from `is_retweet` |
+| `score` | Integer | item `score` or `null` | `null` |
+| `parent_id` | String | `str(parent)` for comments | `null` |
+| `source_dataset` | String | `null` | `bitcoin-tweets` or `covid-tweets` |
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `post_id` | String | Original ID from Hacker News or X |
-| `author_username` | String | FK to `users.username` |
-| `content_text` | String | Post content; HTML tags cleaned |
-| `created_at` | Timestamp | Normalized UTC ISO-8601 |
-| `post_type` | String | `'story'`, `'comment'`, `'tweet'`, `'retweet'`, etc. |
+Skip HN items with `deleted`/`dead` or missing `by`.
 
-#### Example silver S3 layout
+#### Triggers
+
+| Lambda | Bronze input | EventBridge prefix |
+|--------|--------------|-------------------|
+| `hackernews-silver-normalize` | `bronze/hackernews/.../items.json` | `bronze/hackernews/` |
+| `x-silver-normalize` | `bronze/x/{dataset}/raw/*.csv` | `bronze/x/` |
+
+#### Silver S3 layout
 
 ```
-s3://social-medias/silver/
+{data-lake-bucket}/silver/
 ├── posts/
-│   └── year=2026/month=01/day=15/
-│       └── data_001.parquet
+│   └── year=2026/month=05/day=28/
+│       └── *.parquet
 └── users/
     ├── platform=HackerNews/
     └── platform=X/
 ```
 
 **Partitioning:**
-- `users` → by `platform`
-- `posts` → by timestamp (e.g. `year/month/day`)
+- `users` → by `platform` (merge-on-write per platform partition)
+- `posts` → by `year` / `month` / `day` from `created_at`
+
+**Code layout:** `lambdas/silver/common/`, `lambdas/silver/hackernews_silver/`, `lambdas/silver/x_silver/`; stack `infra/cloudformation/silver.yaml`
 
 ---
 
@@ -378,8 +391,13 @@ IaC is not separately scored but is **mandatory** (elimination if missing).
 - `x-bronze-ingest` — `incoming/x/` upload → `bronze/x/{dataset}/raw/...`
 - CloudFormation stacks: network, storage, bronze; CI in `.github/workflows/deploy.yml`
 
+**Silver (implemented):**
+- `hackernews-silver-normalize` — S3 event on `bronze/hackernews/.../items.json` → `silver/posts/`, `silver/users/platform=HackerNews/`
+- `x-silver-normalize` — S3 event on `bronze/x/.../raw/*.csv` → `silver/posts/`, `silver/users/platform=X/`
+- Stack: `infra/cloudformation/silver.yaml`
+
 **Do (remaining work):**
-- Implement silver and gold Lambdas; partition Parquet output
+- Gold Lambdas; partition Parquet output
 - EC2 with PostgreSQL + Superset; S3→PostgreSQL loader Lambda
 - Wire **Discord** failure notifications to all pipeline jobs
 - Attach Lambda/EC2 to VPC; tighten security groups (least privilege)
@@ -393,5 +411,4 @@ IaC is not separately scored but is **mandatory** (elimination if missing).
 - Commit Discord webhook URLs or other secrets to git
 
 **Still open (team choice):**
-- Exact silver/gold schema beyond the examples
-- Step Functions vs. single Lambda per stage
+- Step Functions vs. single Lambda per stage (gold)

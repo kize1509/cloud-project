@@ -306,6 +306,7 @@ Expected gold tables include `daily_users_metric/`, `daily_hn_post_counts/`, ran
 ## Local Checks
 
 ```bash
+python3 -m pip install -r requirements-test.txt
 python3 -m unittest discover -s tests
 bash scripts/package_lambdas.sh build/lambda
 ```

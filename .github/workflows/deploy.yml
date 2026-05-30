@@ -42,7 +42,9 @@ jobs:
         run: python -m pip install --upgrade cfn-lint
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m unittest discover -s tests
 
       - name: Lint CloudFormation templates
         run: cfn-lint --non-zero-exit-code error infra/cloudformation/*.yaml

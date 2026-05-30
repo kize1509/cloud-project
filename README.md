@@ -37,8 +37,7 @@ aws cloudformation deploy \
     Environment="$ENV" \
     GitHubOrg="kize1509" \
     GitHubRepo="cloud-project" \
-    GitHubBranch="main" \
-    CreateOidcProvider=true
+    GitHubBranch="main"
 ```
 
 Set GitHub secret `AWS_ROLE_TO_ASSUME` to the stack output `RoleArn`.

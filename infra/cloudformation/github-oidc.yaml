@@ -17,21 +17,12 @@ Parameters:
   GitHubBranch:
     Type: String
     Default: main
-  CreateOidcProvider:
-    Type: String
-    Default: 'true'
-    AllowedValues:
-      - 'true'
-      - 'false'
-    Description: Set to false if token.actions.githubusercontent.com already exists in the AWS account.
-
-Conditions:
-  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, 'true']
 
 Resources:
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
-    Condition: ShouldCreateOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
@@ -48,10 +39,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !If
-                - ShouldCreateOidcProvider
-                - !Ref GitHubOidcProvider
-                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+              Federated: !Ref GitHubOidcProvider
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:

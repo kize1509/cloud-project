@@ -57,13 +57,15 @@ infra/cloudformation/network.yaml
 infra/cloudformation/storage.yaml
 infra/cloudformation/bronze.yaml
 infra/cloudformation/silver.yaml
+infra/cloudformation/gold.yaml
 ```
 
-### Manual AWS setup (silver)
+### Manual AWS setup (silver + gold)
 
 1. Set GitHub variable `AWSWRANGLER_LAYER_ARN` to the [awswrangler Lambda layer ARN](https://aws-sdk-pandas.readthedocs.io/en/stable/install.html#aws-lambda-layer) for your Python 3.12 region.
 2. Optional Discord webhook in SSM; set `DISCORD_WEBHOOK_PARAMETER_NAME` in GitHub variables.
 3. Ensure bronze data exists before testing silver (HN invoke or X upload below). Silver Lambdas trigger automatically on new bronze S3 objects.
+4. Gold runs automatically when silver post Parquet files land under `silver/posts/`.
 
 ## Add A New Lambda
 
@@ -273,6 +275,33 @@ bash scripts/package_lambdas.sh build/lambda
 # Upload all four zips, then deploy silver.yaml with AwswranglerLayerArn=...
 # See deploy.yml silver stack step for full parameter list.
 ```
+
+## Test Gold
+
+Gold runs automatically when silver post Parquet files land in S3. To backfill from existing silver data, re-copy a posts object:
+
+```bash
+SILVER_KEY=$(aws s3 ls "s3://$DATA_LAKE_BUCKET/silver/posts/year=2026/month=05/day=28/" | awk '{print $4}' | head -1)
+aws s3 cp \
+  "s3://$DATA_LAKE_BUCKET/silver/posts/year=2026/month=05/day=28/$SILVER_KEY" \
+  "s3://$DATA_LAKE_BUCKET/silver/posts/year=2026/month=05/day=28/$SILVER_KEY" \
+  --metadata-directive REPLACE
+```
+
+Verify output:
+
+```bash
+aws s3 ls "s3://$DATA_LAKE_BUCKET/gold/" --recursive
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/$PROJECT-$ENV-gold-transform" \
+  --region "$AWS_REGION" \
+  --start-time $(($(date +%s)*1000 - 1800000)) \
+  --limit 20 \
+  --query 'events[*].message' \
+  --output text
+```
+
+Expected gold tables include `daily_users_metric/`, `daily_hn_post_counts/`, ranking tables, and `data_quality_score/` (see `spec.md`).
 
 ## Local Checks
 

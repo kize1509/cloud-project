@@ -480,7 +480,7 @@ IaC is not separately scored but is **mandatory** (elimination if missing).
 - `x-silver-normalize` — S3 event on `bronze/x/.../raw/*.csv` → `silver/posts/`, `silver/users/platform=X/`
 - Stack: `infra/cloudformation/silver.yaml`
 
-**Gold (this plan):**
+**Gold (implemented):**
 - `gold-transform` — S3 event on `silver/posts/.../*.parquet` → `gold/` metrics and KPI Parquet tables
 - Stack: `infra/cloudformation/gold.yaml`
 

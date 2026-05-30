@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Gold metrics and KPIs from silver Parquet tables.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-computing-prj
+  Environment:
+    Type: String
+    Default: dev
+  AwsRegion:
+    Type: String
+    Default: ''
+  DataLakeBucketName:
+    Type: String
+    Description: Existing data lake bucket from storage.yaml.
+  SilverPrefix:
+    Type: String
+    Default: silver
+  GoldPrefix:
+    Type: String
+    Default: gold
+  DiscordWebhookParameterName:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|/.+
+  AwswranglerLayerArn:
+    Type: String
+    Description: Region-specific AWS SDK for pandas (awswrangler) Lambda layer ARN.
+  GoldTransformLambdaS3Bucket:
+    Type: String
+  GoldTransformLambdaS3Key:
+    Type: String
+
+Conditions:
+  HasDiscordWebhookParameter: !Not [!Equals [!Ref DiscordWebhookParameterName, '']]
+
+Resources:
+  GoldTransformLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-gold-transform-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-gold-transform-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${SilverPrefix}/*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${GoldPrefix}/*
+              - !If
+                - HasDiscordWebhookParameter
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordWebhookParameterName}
+                - !Ref AWS::NoValue
+
+  GoldTransformFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-gold-transform
+      Description: Computes gold metrics and KPIs from silver Parquet tables.
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt GoldTransformLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Layers:
+        - !Ref AwswranglerLayerArn
+      Code:
+        S3Bucket: !Ref GoldTransformLambdaS3Bucket
+        S3Key: !Ref GoldTransformLambdaS3Key
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucketName
+          SILVER_PREFIX: !Ref SilverPrefix
+          GOLD_PREFIX: !Ref GoldPrefix
+          DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
+
+  GoldTransformLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GoldTransformFunction}
+      RetentionInDays: 14
+
+  GoldTransformSilverRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-gold-silver-posts
+      Description: Computes gold metrics when new silver post Parquet files land in S3.
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref DataLakeBucketName
+          object:
+            key:
+              - prefix: !Sub ${SilverPrefix}/posts/
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt GoldTransformFunction.Arn
+          Id: GoldTransformFunctionTarget
+
+  GoldTransformInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref GoldTransformFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GoldTransformSilverRule.Arn
+
+Outputs:
+  GoldTransformFunctionName:
+    Value: !Ref GoldTransformFunction
+  GoldPrefixOutput:
+    Value: !Sub ${GoldPrefix}/

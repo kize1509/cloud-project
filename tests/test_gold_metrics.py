@@ -13,7 +13,7 @@ metrics_spec = importlib.util.spec_from_file_location("gold_metrics", COMMON_DIR
 metrics = importlib.util.module_from_spec(metrics_spec)
 metrics_spec.loader.exec_module(metrics)
 
-schema_spec = importlib.util.spec_from_file_location("gold_schema", COMMON_DIR / "schema.py")
+schema_spec = importlib.util.spec_from_file_location("gold_schema", COMMON_DIR / "gold_schema.py")
 schema = importlib.util.module_from_spec(schema_spec)
 schema_spec.loader.exec_module(schema)
 

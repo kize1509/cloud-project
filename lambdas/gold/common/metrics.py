@@ -1,6 +1,6 @@
 import pandas as pd
 
-from schema import (
+from gold_schema import (
     DATA_QUALITY_SCORE_COLUMNS,
     DAILY_HN_POST_COUNTS_COLUMNS,
     DAILY_USERS_METRIC_COLUMNS,

@@ -283,24 +283,106 @@ Example data:
 | 2025-01-16 | Hacker News | 12030 | 530 |
 | 2025-01-16 | X | 523 | 87 |
 
-#### Example gold S3 layout
+#### Metric definitions
+
+| Metric | Rule |
+|--------|------|
+| Daily HN post counts | Count silver posts where `platform='Hacker News'` and `created_at` date matches the partition date, grouped by `post_type` (`story`, `ask`, `comment`, `job`, `poll`) |
+| Daily user counts | **`new_users`:** users with `created_at` on that date. **`total_users`:** cumulative distinct users with `created_at` date ≤ partition date |
+| Top/bottom HN users by karma | Among HN authors with a post on that date, join to silver users, rank by `karma_score` (exclude null karma) |
+| Top HN posts by score | HN posts on that date where `post_type != 'job'`, sort by `score` desc, take 10 |
+| Top HN jobs by score | HN posts on that date where `post_type = 'job'`, sort by `score` desc, take 10 |
+| Top X users by followers | All X users in silver snapshot, sort by `follower_count` desc, take 10 |
+| Data Quality Score | Percentage of non-null values across all columns in the target dataframe (posts partition or users snapshot) |
+
+#### Gold tables
+
+**`daily_users_metric`** — partition keys: `platform` (`HackerNews` | `X`), `date`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Metric date |
+| `platform` | String | `'Hacker News'` or `'X'` |
+| `total_users` | Integer | Cumulative users registered on or before `date` |
+| `new_users` | Integer | Users registered on `date` |
+
+**`daily_hn_post_counts`** — partition key: `date`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Metric date |
+| `post_type` | String | `story`, `ask`, `comment`, `job`, or `poll` |
+| `count` | Integer | Post count for that type on `date` |
+
+**`top_hn_users_by_karma`** / **`bottom_hn_users_by_karma`** — partition key: `date`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Metric date |
+| `rank` | Integer | 1–10 |
+| `username` | String | HN username |
+| `karma_score` | Integer | Karma at transform time |
+
+**`top_hn_posts_by_score`** — partition key: `date`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Metric date |
+| `rank` | Integer | 1–10 |
+| `post_id` | String | HN post id |
+| `post_type` | String | Silver `post_type` |
+| `score` | Integer | Post score |
+
+**`top_hn_jobs_by_score`** — partition key: `date`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Metric date |
+| `rank` | Integer | 1–10 |
+| `post_id` | String | HN job post id |
+| `score` | Integer | Job score |
+
+**`top_x_users_by_followers`** — partition key: `date`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Snapshot date (when gold ran) |
+| `rank` | Integer | 1–10 |
+| `username` | String | X username |
+| `follower_count` | Integer | Follower count |
+
+**`data_quality_score`** — partition keys: `date`, `table_name` (`posts` | `users`)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `date` | date | Metric date |
+| `table_name` | String | `posts` or `users` |
+| `platform` | String | `'Hacker News'`, `'X'`, or `all` for combined users check |
+| `non_null_pct` | Float | Percentage of non-null cell values |
+
+#### Trigger
+
+| Lambda | Input | EventBridge prefix |
+|--------|-------|-------------------|
+| `gold-transform` | New silver post Parquet | `silver/posts/` |
+
+Runs idempotently: re-processing the same date overwrites gold partitions (`overwrite_partitions`).
+
+#### Gold S3 layout
 
 ```
-s3://social-medias/gold/
-└── daily_users_metric/
-    ├── platform=HackerNews/
-    │   ├── date=2026-01-15/
-    │   │   └── data_001.parquet
-    │   └── date=2026-01-16/
-    │       └── data_001.parquet
-    └── platform=X/
-        ├── date=2026-01-15/
-        │   └── data_001.parquet
-        └── date=2026-01-16/
-            └── data_001.parquet
+{data-lake-bucket}/gold/
+├── daily_users_metric/platform={HackerNews|X}/date=YYYY-MM-DD/
+├── daily_hn_post_counts/date=YYYY-MM-DD/
+├── top_hn_users_by_karma/date=YYYY-MM-DD/
+├── bottom_hn_users_by_karma/date=YYYY-MM-DD/
+├── top_hn_posts_by_score/date=YYYY-MM-DD/
+├── top_hn_jobs_by_score/date=YYYY-MM-DD/
+├── top_x_users_by_followers/date=YYYY-MM-DD/
+└── data_quality_score/date=YYYY-MM-DD/table_name={posts|users}/
 ```
 
-**Partitioning:** by `platform` and `date`
+**Code layout:** `lambdas/gold/common/`, `lambdas/gold/gold_transform/`; stack `infra/cloudformation/gold.yaml`
 
 ---
 
@@ -341,6 +423,8 @@ All infrastructure is defined in **CloudFormation** under `infra/cloudformation/
 | network | `network.yaml` | VPC, subnets, IGW, optional NAT, S3 VPC endpoint, Lambda security group |
 | storage | `storage.yaml` | Data lake bucket, artifact bucket |
 | bronze | `bronze.yaml` | Bronze Lambdas, IAM, EventBridge Scheduler + S3 event rule |
+| silver | `silver.yaml` | Silver normalization Lambdas, S3 event rules |
+| gold | `gold.yaml` | Gold metrics Lambda, S3 event on silver posts |
 | github-oidc | `github-oidc.yaml` | GitHub Actions deploy role (one-time bootstrap) |
 
 Deploy via GitHub Actions (`.github/workflows/deploy.yml`) or AWS CLI. Lambda code is packaged with `scripts/package_lambdas.sh`.
@@ -396,8 +480,11 @@ IaC is not separately scored but is **mandatory** (elimination if missing).
 - `x-silver-normalize` — S3 event on `bronze/x/.../raw/*.csv` → `silver/posts/`, `silver/users/platform=X/`
 - Stack: `infra/cloudformation/silver.yaml`
 
+**Gold (this plan):**
+- `gold-transform` — S3 event on `silver/posts/.../*.parquet` → `gold/` metrics and KPI Parquet tables
+- Stack: `infra/cloudformation/gold.yaml`
+
 **Do (remaining work):**
-- Gold Lambdas; partition Parquet output
 - EC2 with PostgreSQL + Superset; S3→PostgreSQL loader Lambda
 - Wire **Discord** failure notifications to all pipeline jobs
 - Attach Lambda/EC2 to VPC; tighten security groups (least privilege)
@@ -411,4 +498,4 @@ IaC is not separately scored but is **mandatory** (elimination if missing).
 - Commit Discord webhook URLs or other secrets to git
 
 **Still open (team choice):**
-- Step Functions vs. single Lambda per stage (gold)
+- Step Functions vs. single Lambda per stage (future orchestration)

@@ -118,6 +118,13 @@ Resources:
                   - lambda:UpdateFunctionConfiguration
                 Resource:
                   - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-${Environment}-*
+              - Sid: ReadAwswranglerLambdaLayer
+                Effect: Allow
+                Action:
+                  - lambda:GetLayerVersion
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:336392948345:layer:AWSSDKPandas-Python312:*
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:336392948345:layer:aws-sdk-pandas-python312:*
               - Sid: ManageProjectEvents
                 Effect: Allow
                 Action:

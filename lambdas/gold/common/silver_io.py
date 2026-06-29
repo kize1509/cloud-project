@@ -1,6 +1,6 @@
 import os
 
-from gold_schema import USER_PARTITION_HACKER_NEWS, USER_PARTITION_X
+from gold_schema import PLATFORM_HACKER_NEWS, PLATFORM_X, USER_PARTITION_HACKER_NEWS, USER_PARTITION_X
 
 
 def read_posts_partition(bucket, year, month, day, silver_prefix="silver"):
@@ -22,11 +22,16 @@ def read_users_snapshot(bucket, platform_partition, silver_prefix="silver"):
     prefix = silver_prefix.strip("/")
     path = f"s3://{bucket}/{prefix}/users/platform={platform_partition}/"
     try:
-        return wr.s3.read_parquet(path=path, dataset=True)
+        dataframe = wr.s3.read_parquet(path=path, dataset=True)
     except wr.exceptions.NoFilesFound:
         import pandas as pd
 
         return pd.DataFrame()
+    if platform_partition == USER_PARTITION_HACKER_NEWS:
+        dataframe["platform"] = PLATFORM_HACKER_NEWS
+    elif platform_partition == USER_PARTITION_X:
+        dataframe["platform"] = PLATFORM_X
+    return dataframe
 
 
 def read_silver_for_date(bucket, year, month, day):

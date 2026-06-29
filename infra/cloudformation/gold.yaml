@@ -98,6 +98,8 @@ Resources:
           DATA_LAKE_BUCKET: !Ref DataLakeBucketName
           SILVER_PREFIX: !Ref SilverPrefix
           GOLD_PREFIX: !Ref GoldPrefix
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
           DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
 
   GoldTransformLogGroup:

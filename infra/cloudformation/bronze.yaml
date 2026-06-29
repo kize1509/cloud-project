@@ -98,6 +98,8 @@ Resources:
         Variables:
           DATA_LAKE_BUCKET: !Ref DataLakeBucketName
           BRONZE_PREFIX: !Ref BronzePrefix
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
           DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
           HN_TARGET_DAY_OFFSET: !Ref HnTargetDayOffset
       Tags:
@@ -205,6 +207,8 @@ Resources:
         Variables:
           DATA_LAKE_BUCKET: !Ref DataLakeBucketName
           BRONZE_PREFIX: !Ref BronzePrefix
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
           DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
       Tags:
         - Key: Project

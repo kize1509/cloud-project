@@ -105,6 +105,8 @@ Resources:
           DATA_LAKE_BUCKET: !Ref DataLakeBucketName
           BRONZE_PREFIX: !Ref BronzePrefix
           SILVER_PREFIX: !Ref SilverPrefix
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
           HN_USER_FETCH_WORKERS: !Ref HnUserFetchWorkers
           DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
 
@@ -203,6 +205,8 @@ Resources:
           DATA_LAKE_BUCKET: !Ref DataLakeBucketName
           BRONZE_PREFIX: !Ref BronzePrefix
           SILVER_PREFIX: !Ref SilverPrefix
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
           DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
 
   XSilverLogGroup:

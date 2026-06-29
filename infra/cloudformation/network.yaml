@@ -18,6 +18,12 @@ Parameters:
       - 'true'
       - 'false'
     Description: Set to true only when private subnets need outbound internet access.
+  AllowedAdminCidr:
+    Type: String
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    Description: >-
+      CIDR allowed to reach the Superset UI (TCP 8088) on the EC2 instance.
+      Must be supplied explicitly (e.g. your-ip/32) to keep least privilege.
 
 Conditions:
   CreateNatGateway: !Equals [!Ref EnableNatGateway, 'true']
@@ -191,6 +197,66 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-lambda-sg
 
+  # Security group for the EC2 host running PostgreSQL + Apache Superset (Feature 4).
+  # Shell access is via SSM Session Manager only, so no SSH (22) ingress.
+  Ec2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL + Superset host; Superset UI from admins, Postgres from loader Lambda only.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Superset UI from the admin CIDR.
+          IpProtocol: tcp
+          FromPort: 8088
+          ToPort: 8088
+          CidrIp: !Ref AllowedAdminCidr
+      SecurityGroupEgress:
+        - Description: Outbound for Docker image and package pulls.
+          IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ec2-sg
+
+  # Security group for the gold->PostgreSQL loader Lambda (Feature 4/7).
+  # No ingress; egress limited to PostgreSQL (to the EC2 SG) and HTTPS (S3 gateway endpoint).
+  LoaderLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Gold-to-PostgreSQL loader Lambda; egress limited to Postgres and HTTPS.
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - Description: HTTPS to S3 via the gateway endpoint.
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-loader-lambda-sg
+
+  # The two PostgreSQL (5432) rules reference each other's SG, so they are declared
+  # as standalone resources to avoid a circular dependency between the SGs above.
+  Ec2PostgresIngressFromLoader:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: PostgreSQL from the loader Lambda security group only.
+      GroupId: !Ref Ec2InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref LoaderLambdaSecurityGroup
+
+  LoaderPostgresEgressToEc2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: PostgreSQL to the EC2 instance security group.
+      GroupId: !Ref LoaderLambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref Ec2InstanceSecurityGroup
+
 Outputs:
   VpcId:
     Value: !Ref Vpc
@@ -208,4 +274,12 @@ Outputs:
     Value: !Ref LambdaSecurityGroup
     Export:
       Name: !Sub ${ProjectName}-${Environment}-LambdaSecurityGroupId
+  Ec2InstanceSecurityGroupId:
+    Value: !Ref Ec2InstanceSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-Ec2InstanceSecurityGroupId
+  LoaderLambdaSecurityGroupId:
+    Value: !Ref LoaderLambdaSecurityGroup
+    Export:
+      Name: !Sub ${ProjectName}-${Environment}-LoaderLambdaSecurityGroupId
 

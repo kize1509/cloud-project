@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Gold-to-PostgreSQL loader Lambda (Feature 4). Reads gold Parquet metrics from S3 and
+  loads them into the PostgreSQL database on the EC2 visualization host. Runs in the VPC
+  (private subnets + loader SG) for least-privilege network access (Feature 7).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-computing-prj
+  Environment:
+    Type: String
+    Default: dev
+  AwsRegion:
+    Type: String
+    Default: ''
+    Description: Optional deployment region label supplied by CI.
+  DataLakeBucketName:
+    Type: String
+    Description: Existing data lake bucket from storage.yaml.
+  GoldPrefix:
+    Type: String
+    Default: gold
+  AwswranglerLayerArn:
+    Type: String
+    Description: Region-specific AWS SDK for pandas (awswrangler) Lambda layer ARN.
+  LoaderLambdaS3Bucket:
+    Type: String
+    Description: S3 bucket containing the packaged loader Lambda artifact.
+  LoaderLambdaS3Key:
+    Type: String
+    Description: S3 key for the packaged loader Lambda artifact.
+  DiscordWebhookParameterName:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|/.+
+    Description: SSM parameter name with the Discord webhook URL (delivery requires outbound internet).
+  DbName:
+    Type: String
+    Default: metrics
+  DbUser:
+    Type: String
+    Description: PostgreSQL username (must match the SSM-provisioned EC2 credentials).
+  DbPassword:
+    Type: String
+    NoEcho: true
+    Description: PostgreSQL password, injected at deploy from a GitHub Actions secret.
+  LoaderScheduleExpression:
+    Type: String
+    Default: cron(45 2 * * ? *)
+    Description: Daily schedule; runs after the gold transform has produced metrics.
+
+Conditions:
+  HasDiscordWebhookParameter: !Not [!Equals [!Ref DiscordWebhookParameterName, '']]
+
+Resources:
+  LoaderLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-loader-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Grants logs + the ENI permissions a VPC-attached Lambda needs.
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-loader-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${DataLakeBucketName}/${GoldPrefix}/*
+              - !If
+                - HasDiscordWebhookParameter
+                - Effect: Allow
+                  Action:
+                    - ssm:GetParameter
+                  Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DiscordWebhookParameterName}
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  LoaderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${Environment}-gold-to-postgres
+      Description: Loads gold Parquet metrics from S3 into PostgreSQL on the EC2 host.
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt LoaderLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Layers:
+        - !Ref AwswranglerLayerArn
+      Code:
+        S3Bucket: !Ref LoaderLambdaS3Bucket
+        S3Key: !Ref LoaderLambdaS3Key
+      VpcConfig:
+        SubnetIds: !Split
+          - ','
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-PrivateSubnetIds
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-LoaderLambdaSecurityGroupId
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucketName
+          GOLD_PREFIX: !Ref GoldPrefix
+          EC2_HOST: !ImportValue
+            Fn::Sub: ${ProjectName}-${Environment}-Ec2PrivateIp
+          DB_NAME: !Ref DbName
+          DB_USER: !Ref DbUser
+          DB_PASSWORD: !Ref DbPassword
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: AwsRegion
+          Value: !Ref AwsRegion
+
+  LoaderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${LoaderFunction}
+      RetentionInDays: 14
+
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-loader-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${Environment}-loader-scheduler-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt LoaderFunction.Arn
+
+  LoaderDailySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-gold-to-postgres-daily
+      Description: Daily load of gold metrics into PostgreSQL after the gold transform.
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: !Ref LoaderScheduleExpression
+      State: ENABLED
+      Target:
+        Arn: !GetAtt LoaderFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: !Sub '{"source":"eventbridge-scheduler","project":"${ProjectName}","environment":"${Environment}"}'
+
+Outputs:
+  LoaderFunctionName:
+    Value: !Ref LoaderFunction
+  LoaderScheduleName:
+    Value: !Ref LoaderDailySchedule

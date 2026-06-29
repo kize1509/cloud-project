@@ -33,11 +33,34 @@ package_lambda_with_gold_common() {
   rm -rf "${staging_dir}"
 }
 
+# Loader bundles its own app + common/ and vendors a Lambda-compatible psycopg2 wheel
+# (awswrangler is provided by the Lambda layer at deploy time).
+package_lambda_loader() {
+  local source_dir="$1"
+  local artifact_name="$2"
+  local staging_dir
+  staging_dir="$(mktemp -d)"
+
+  cp "${source_dir}/app.py" "${staging_dir}/app.py"
+  cp -r "${source_dir}/common" "${staging_dir}/common"
+  python3 -m pip install \
+    --platform manylinux2014_x86_64 \
+    --implementation cp \
+    --python-version 3.12 \
+    --only-binary=:all: \
+    --target "${staging_dir}" \
+    --quiet \
+    psycopg2-binary
+  (cd "${staging_dir}" && zip -qr "${OUTPUT_DIR}/${artifact_name}.zip" .)
+  rm -rf "${staging_dir}"
+}
+
 (cd "${ROOT_DIR}/lambdas/bronze/hackernews_ingest" && zip -qr "${OUTPUT_DIR}/hackernews_ingest.zip" .)
 (cd "${ROOT_DIR}/lambdas/bronze/x_ingest" && zip -qr "${OUTPUT_DIR}/x_ingest.zip" .)
 
 package_lambda_with_common "${ROOT_DIR}/lambdas/silver/hackernews_silver" "hackernews_silver"
 package_lambda_with_common "${ROOT_DIR}/lambdas/silver/x_silver" "x_silver"
 package_lambda_with_gold_common "${ROOT_DIR}/lambdas/gold/gold_transform" "gold_transform"
+package_lambda_loader "${ROOT_DIR}/lambdas/ec2/loader" "loader"
 
 echo "Packaged Lambda artifacts in ${OUTPUT_DIR}"

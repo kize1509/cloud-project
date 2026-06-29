@@ -486,11 +486,21 @@ IaC is not separately scored but is **mandatory** (elimination if missing).
 - `gold-transform` — S3 event on `silver/posts/.../*.parquet` → `gold/` metrics and KPI Parquet tables
 - Stack: `infra/cloudformation/gold.yaml`
 
+**Visualization (implemented):**
+- EC2 (`t3.micro`, public subnet) runs PostgreSQL + Apache Superset via Docker Compose
+  (UserData); free-tier, shell access via SSM Session Manager. Stack: `infra/cloudformation/ec2.yaml`
+- `gold-to-postgres` — VPC-attached loader Lambda (`lambdas/ec2/loader/`) reads gold Parquet
+  and idempotently loads it into PostgreSQL on a daily schedule. Stack: `infra/cloudformation/loader.yaml`
+- DB/Superset credentials live in an SSM `SecureString` (EC2 reads it); the loader gets the DB
+  password via the `DB_PASSWORD` deploy secret (no NAT, no SSM from its private subnet)
+
+**Network security (implemented):**
+- `network.yaml` adds an EC2 SG (8088 from `AllowedAdminCidr`, 5432 from the loader SG) and a
+  loader Lambda SG (egress 5432 + 443 only); only EC2 + loader join the VPC
+
 **Do (remaining work):**
-- EC2 with PostgreSQL + Superset; S3→PostgreSQL loader Lambda
-- Wire **Discord** failure notifications to all pipeline jobs
-- Attach Lambda/EC2 to VPC; tighten security groups (least privilege)
-- Add new Lambdas under `lambdas/` + `infra/cloudformation/` + `deploy.yml`
+- Wire **Discord** failure notifications to any future scheduled/Step Functions jobs
+  (loader alerts need NAT to reach Discord from its private subnet)
 
 **Do not:**
 - Transform or normalize data in bronze Lambdas

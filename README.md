@@ -67,6 +67,29 @@ infra/cloudformation/gold.yaml
 3. Ensure bronze data exists before testing silver (HN invoke or X upload below). Silver Lambdas trigger automatically on new bronze S3 objects.
 4. Gold runs automatically when silver post Parquet files land under `silver/posts/`.
 
+### Discord failure notifications
+
+Store the webhook URL in SSM Parameter Store as a `SecureString`:
+
+```bash
+aws ssm put-parameter \
+  --region "$AWS_REGION" \
+  --name "/$PROJECT/$ENV/discord/webhook" \
+  --type SecureString \
+  --value "<discord-webhook-url>" \
+  --overwrite
+```
+
+Set GitHub repo variable `DISCORD_WEBHOOK_PARAMETER_NAME` to:
+
+```text
+/cloud-computing-prj/dev/discord/webhook
+```
+
+Re-run the deploy workflow so Lambda environment variables and IAM permissions are updated.
+
+The webhook URL must not be committed to git or stored directly in workflow files.
+
 ## Add A New Lambda
 
 1. Add code:
@@ -302,6 +325,33 @@ aws logs filter-log-events \
 ```
 
 Expected gold tables include `daily_users_metric/`, `daily_hn_post_counts/`, ranking tables, and `data_quality_score/` (see `spec.md`).
+
+## Test Discord Notifications
+
+Use a fast failing invoke after `DISCORD_WEBHOOK_PARAMETER_NAME` is deployed. This should send a Discord alert and still leave the Lambda invocation failed in CloudWatch:
+
+```bash
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$PROJECT-$ENV-x-bronze-ingest" \
+  --payload '{}' \
+  /tmp/x-bronze-failure.json
+
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/$PROJECT-$ENV-x-bronze-ingest" \
+  --region "$AWS_REGION" \
+  --start-time $(($(date +%s)*1000 - 300000)) \
+  --limit 20 \
+  --query 'events[*].message' \
+  --output text
+```
+
+Expected Discord format:
+
+```text
+[cloud-computing-prj][dev][bronze] x-ingest failed
+Error: event did not contain any S3 object create records
+```
 
 ## Local Checks
 

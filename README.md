@@ -6,13 +6,19 @@ Bronze AWS ingestion and silver normalization for Hacker News and X/Kaggle datas
 
 - AWS CLI authenticated to the target account.
 - Python 3.12 locally or in CI.
-- GitHub repo secret: `AWS_ROLE_TO_ASSUME`.
+- GitHub repo secrets:
+  - `AWS_ROLE_TO_ASSUME`
+  - `DB_PASSWORD`, PostgreSQL password for the loader Lambda (must match the value in the SSM DB-credentials parameter)
 - GitHub repo variables:
   - `AWS_REGION`, for example `eu-north-1`
   - `CFN_PROJECT_NAME`, default `cloud-computing-prj`
   - `CFN_ENVIRONMENT`, default `dev`
   - `HN_SCHEDULE_EXPRESSION`, default `cron(15 2 * * ? *)`
-  - `AWSWRANGLER_LAYER_ARN`, awswrangler Lambda layer for your region (required for silver deploy)
+  - `AWSWRANGLER_LAYER_ARN`, awswrangler Lambda layer for your region (required for silver/gold/loader deploy)
+  - `ALLOWED_ADMIN_CIDR`, CIDR allowed to reach the Superset UI, for example `203.0.113.4/32` (required for network deploy)
+  - `DB_CREDENTIALS_PARAMETER_NAME`, SSM SecureString name with DB + Superset credentials, default `/cloud-computing-prj/dev/db/credentials`
+  - `DB_USER`, PostgreSQL username, default `metrics_app`
+  - `LOADER_SCHEDULE_EXPRESSION`, default `cron(45 2 * * ? *)`
 
 Local shell defaults:
 
@@ -58,6 +64,8 @@ infra/cloudformation/storage.yaml
 infra/cloudformation/bronze.yaml
 infra/cloudformation/silver.yaml
 infra/cloudformation/gold.yaml
+infra/cloudformation/ec2.yaml
+infra/cloudformation/loader.yaml
 ```
 
 ### Manual AWS setup (silver + gold)
@@ -325,6 +333,88 @@ aws logs filter-log-events \
 ```
 
 Expected gold tables include `daily_users_metric/`, `daily_hn_post_counts/`, ranking tables, and `data_quality_score/` (see `spec.md`).
+
+## Visualization (EC2 + Superset + loader)
+
+The `ec2` stack runs PostgreSQL + Apache Superset on a free-tier `t3.micro` in a public
+subnet (Docker Compose via UserData). The `loader` stack runs a VPC-attached Lambda that
+loads gold Parquet metrics from S3 into PostgreSQL on a daily schedule. Superset reads the
+`metrics` database.
+
+### Prerequisite: DB + Superset credentials in SSM
+
+Create a single SSM `SecureString` JSON parameter before deploying the `ec2` stack. The EC2
+host (which has internet via the IGW) reads it for free; the loader Lambda receives the same
+DB password via the `DB_PASSWORD` GitHub secret (it cannot reach SSM from its private subnet).
+Keep the two in sync.
+
+```bash
+aws ssm put-parameter \
+  --region "$AWS_REGION" \
+  --name "/$PROJECT/$ENV/db/credentials" \
+  --type SecureString \
+  --value '{"db_username":"metrics_app","db_password":"<password>","superset_admin_username":"admin","superset_admin_password":"<admin-password>","superset_secret_key":"<random-hex>"}' \
+  --overwrite
+```
+
+Then set GitHub variable `DB_USER=metrics_app`, secret `DB_PASSWORD=<password>`, and variable
+`ALLOWED_ADMIN_CIDR=<your-ip>/32`, and re-run the deploy workflow.
+
+### Open Superset
+
+```bash
+PUBLIC_IP=$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name "$PROJECT-$ENV-ec2" \
+  --query "Stacks[0].Outputs[?OutputKey=='Ec2PublicIp'].OutputValue" \
+  --output text)
+echo "http://$PUBLIC_IP:8088"
+```
+
+Log in with the Superset admin credentials from SSM. One-time: add the metrics database under
+**Settings -> Database Connections** using the in-VPC host
+`postgresql+psycopg2://<db_user>:<db_password>@postgres:5432/metrics`, then build charts on
+`daily_users_metric`, `top_hn_posts_by_score`, etc.
+
+### Run the loader
+
+```bash
+aws lambda invoke \
+  --region "$AWS_REGION" \
+  --function-name "$PROJECT-$ENV-gold-to-postgres" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"date":"2026-05-28"}' \
+  /tmp/loader.json
+cat /tmp/loader.json
+```
+
+The loader is idempotent per date (delete-then-insert), so re-runs do not duplicate rows. It
+also runs daily via `LoaderScheduleExpression`.
+
+### Network security (Feature 7)
+
+Least-privilege is enforced via two security groups in `network.yaml`:
+
+- **EC2 SG** — Superset (`8088`) only from `AllowedAdminCidr`; PostgreSQL (`5432`) only from
+  the loader SG; no SSH (shell access is via SSM Session Manager).
+- **Loader Lambda SG** — no ingress; egress limited to `5432` (to the EC2 SG) and `443`
+  (S3 via the free gateway endpoint).
+
+Only the EC2 host and the loader Lambda join the VPC. The bronze/silver/gold Lambdas stay
+outside it because they need outbound internet/S3 and the VPC has no NAT gateway (cost).
+
+> Note: because the loader runs in a private subnet with no NAT, it cannot reach Discord, so
+> loader failure alerts surface in CloudWatch rather than Discord unless NAT is enabled.
+
+Connect a shell to the host for debugging:
+
+```bash
+aws ssm start-session --region "$AWS_REGION" \
+  --target $(aws cloudformation describe-stacks --region "$AWS_REGION" \
+    --stack-name "$PROJECT-$ENV-ec2" \
+    --query "Stacks[0].Outputs[?OutputKey=='Ec2InstanceId'].OutputValue" --output text)
+# then: sudo docker ps   /   sudo docker compose -f /opt/app/docker-compose.yml logs
+```
 
 ## Test Discord Notifications
 

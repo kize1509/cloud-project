@@ -22,6 +22,11 @@ env:
   DISCORD_WEBHOOK_PARAMETER_NAME: ${{ vars.DISCORD_WEBHOOK_PARAMETER_NAME || '' }}
   HN_SCHEDULE_EXPRESSION: ${{ vars.HN_SCHEDULE_EXPRESSION || 'cron(15 2 * * ? *)' }}
   AWSWRANGLER_LAYER_ARN: ${{ vars.AWSWRANGLER_LAYER_ARN }}
+  ALLOWED_ADMIN_CIDR: ${{ vars.ALLOWED_ADMIN_CIDR }}
+  DB_CREDENTIALS_PARAMETER_NAME: ${{ vars.DB_CREDENTIALS_PARAMETER_NAME || '/cloud-computing-prj/dev/db/credentials' }}
+  DB_USER: ${{ vars.DB_USER || 'metrics_app' }}
+  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+  LOADER_SCHEDULE_EXPRESSION: ${{ vars.LOADER_SCHEDULE_EXPRESSION || 'cron(45 2 * * ? *)' }}
 
 jobs:
   deploy:
@@ -56,6 +61,8 @@ jobs:
           aws cloudformation validate-template --template-body file://infra/cloudformation/bronze.yaml
           aws cloudformation validate-template --template-body file://infra/cloudformation/silver.yaml
           aws cloudformation validate-template --template-body file://infra/cloudformation/gold.yaml
+          aws cloudformation validate-template --template-body file://infra/cloudformation/ec2.yaml
+          aws cloudformation validate-template --template-body file://infra/cloudformation/loader.yaml
           aws cloudformation validate-template --template-body file://infra/cloudformation/github-oidc.yaml
 
       - name: Deploy network stack
@@ -66,6 +73,7 @@ jobs:
             --parameter-overrides \
               ProjectName="${CFN_PROJECT_NAME}" \
               Environment="${CFN_ENVIRONMENT}" \
+              AllowedAdminCidr="${ALLOWED_ADMIN_CIDR}" \
             --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"
 
       - name: Deploy storage stack
@@ -98,12 +106,14 @@ jobs:
           HN_SILVER_KEY="lambda-artifacts/${GITHUB_SHA}/hackernews_silver.zip"
           X_SILVER_KEY="lambda-artifacts/${GITHUB_SHA}/x_silver.zip"
           GOLD_KEY="lambda-artifacts/${GITHUB_SHA}/gold_transform.zip"
+          LOADER_KEY="lambda-artifacts/${GITHUB_SHA}/loader.zip"
 
           aws s3 cp build/lambda/hackernews_ingest.zip "s3://${ARTIFACT_BUCKET}/${HN_KEY}"
           aws s3 cp build/lambda/x_ingest.zip "s3://${ARTIFACT_BUCKET}/${X_KEY}"
           aws s3 cp build/lambda/hackernews_silver.zip "s3://${ARTIFACT_BUCKET}/${HN_SILVER_KEY}"
           aws s3 cp build/lambda/x_silver.zip "s3://${ARTIFACT_BUCKET}/${X_SILVER_KEY}"
           aws s3 cp build/lambda/gold_transform.zip "s3://${ARTIFACT_BUCKET}/${GOLD_KEY}"
+          aws s3 cp build/lambda/loader.zip "s3://${ARTIFACT_BUCKET}/${LOADER_KEY}"
 
           {
             echo "artifact_bucket=${ARTIFACT_BUCKET}"
@@ -113,6 +123,7 @@ jobs:
             echo "hn_silver_key=${HN_SILVER_KEY}"
             echo "x_silver_key=${X_SILVER_KEY}"
             echo "gold_key=${GOLD_KEY}"
+            echo "loader_key=${LOADER_KEY}"
             echo "account_id=${ACCOUNT_ID}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -176,4 +187,37 @@ jobs:
               AwswranglerLayerArn="${AWSWRANGLER_LAYER_ARN}" \
               GoldTransformLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
               GoldTransformLambdaS3Key="${{ steps.artifacts.outputs.gold_key }}" \
+            --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"
+
+      - name: Deploy ec2 stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-ec2" \
+            --template-file infra/cloudformation/ec2.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ProjectName="${CFN_PROJECT_NAME}" \
+              Environment="${CFN_ENVIRONMENT}" \
+              DbCredentialsParameterName="${DB_CREDENTIALS_PARAMETER_NAME}" \
+            --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"
+
+      - name: Deploy loader stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${CFN_PROJECT_NAME}-${CFN_ENVIRONMENT}-loader" \
+            --template-file infra/cloudformation/loader.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ProjectName="${CFN_PROJECT_NAME}" \
+              Environment="${CFN_ENVIRONMENT}" \
+              AwsRegion="${AWS_REGION}" \
+              DataLakeBucketName="${{ steps.artifacts.outputs.data_lake_bucket }}" \
+              GoldPrefix="gold" \
+              DiscordWebhookParameterName="${DISCORD_WEBHOOK_PARAMETER_NAME}" \
+              AwswranglerLayerArn="${AWSWRANGLER_LAYER_ARN}" \
+              LoaderLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
+              LoaderLambdaS3Key="${{ steps.artifacts.outputs.loader_key }}" \
+              DbUser="${DB_USER}" \
+              DbPassword="${DB_PASSWORD}" \
+              LoaderScheduleExpression="${LOADER_SCHEDULE_EXPRESSION}" \
             --tags Project="${CFN_PROJECT_NAME}" Environment="${CFN_ENVIRONMENT}"

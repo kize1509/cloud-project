@@ -406,8 +406,10 @@ Send notifications when any job **fails or does not complete successfully**.
 
 **Discord** via webhook.
 
-- Bronze Lambdas read webhook URL from SSM (`DISCORD_WEBHOOK_PARAMETER_NAME`); enabled when parameter is set
-- Notify on failure of: HN ingestion, X dataset ingestion, silver normalization, gold transformation, S3→PostgreSQL load, and any Step Functions / scheduled jobs
+- Bronze, silver, and gold Lambdas read webhook URL from SSM (`DISCORD_WEBHOOK_PARAMETER_NAME`); enabled when parameter is set
+- Webhook value is stored as an SSM `SecureString`; GitHub stores only the parameter name
+- Current notifications include stage/job/error context for: HN ingestion, X dataset ingestion, silver normalization, and gold transformation
+- Future notifications must include S3→PostgreSQL load and any Step Functions / scheduled jobs
 - Never commit webhook URLs or other secrets to the repo
 
 ---

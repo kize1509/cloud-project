@@ -152,6 +152,7 @@ jobs:
               SilverPrefix="silver" \
               DiscordWebhookParameterName="${DISCORD_WEBHOOK_PARAMETER_NAME}" \
               AwswranglerLayerArn="${AWSWRANGLER_LAYER_ARN}" \
+              HnUserFetchWorkers="32" \
               HackerNewsSilverLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \
               HackerNewsSilverLambdaS3Key="${{ steps.artifacts.outputs.hn_silver_key }}" \
               XSilverLambdaS3Bucket="${{ steps.artifacts.outputs.artifact_bucket }}" \

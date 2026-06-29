@@ -27,6 +27,12 @@ Parameters:
   AwswranglerLayerArn:
     Type: String
     Description: Region-specific AWS SDK for pandas (awswrangler) Lambda layer ARN.
+  HnUserFetchWorkers:
+    Type: Number
+    Default: 32
+    MinValue: 1
+    MaxValue: 64
+    Description: Concurrent Hacker News user profile fetches during silver normalization.
   HackerNewsSilverLambdaS3Bucket:
     Type: String
   HackerNewsSilverLambdaS3Key:
@@ -99,6 +105,7 @@ Resources:
           DATA_LAKE_BUCKET: !Ref DataLakeBucketName
           BRONZE_PREFIX: !Ref BronzePrefix
           SILVER_PREFIX: !Ref SilverPrefix
+          HN_USER_FETCH_WORKERS: !Ref HnUserFetchWorkers
           DISCORD_WEBHOOK_PARAMETER_NAME: !Ref DiscordWebhookParameterName
 
   HackerNewsSilverLogGroup:

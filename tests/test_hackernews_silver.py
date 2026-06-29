@@ -53,6 +53,31 @@ class HackerNewsSilverTests(unittest.TestCase):
         self.assertEqual({user["username"] for user in users}, {"alice", "bob"})
         self.assertEqual(users[0]["karma_score"], 123)
 
+    def test_fetch_hn_users_deduplicates_usernames(self):
+        calls = []
+
+        def fetch_user(username):
+            calls.append(username)
+            return {"karma": 100, "created": 1000}
+
+        profiles = app.fetch_hn_users(["alice", "bob", "alice"], fetch_user_fn=fetch_user, max_workers=2)
+
+        self.assertEqual(set(profiles.keys()), {"alice", "bob"})
+        self.assertEqual(sorted(calls), ["alice", "bob"])
+        self.assertEqual(profiles["alice"]["karma_score"], 100)
+
+    def test_fetch_hn_users_preserves_failed_profiles_as_nulls(self):
+        def fetch_user(username):
+            if username == "bob":
+                raise TimeoutError("slow user endpoint")
+            return {"karma": 100, "created": 1000}
+
+        profiles = app.fetch_hn_users(["alice", "bob"], fetch_user_fn=fetch_user, max_workers=2)
+
+        self.assertEqual(profiles["alice"]["karma_score"], 100)
+        self.assertIsNone(profiles["bob"]["karma_score"])
+        self.assertIsNone(profiles["bob"]["created_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

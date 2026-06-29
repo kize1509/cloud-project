@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 COMMON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "common")
 if os.path.isdir(COMMON_DIR) and COMMON_DIR not in sys.path:
@@ -14,6 +15,8 @@ from timestamps import epoch_to_iso8601, partition_keys_from_iso8601  # noqa: E4
 
 
 HN_API_BASE_URL = os.environ.get("HN_API_BASE_URL", "https://hacker-news.firebaseio.com/v0")
+DEFAULT_HN_USER_FETCH_WORKERS = 32
+DEFAULT_HN_USER_FETCH_TIMEOUT_SECONDS = 3
 
 
 def should_skip_item(item):
@@ -66,7 +69,7 @@ def item_to_post_row(item):
     }
 
 
-def http_get_json(url, timeout=10):
+def http_get_json(url, timeout=DEFAULT_HN_USER_FETCH_TIMEOUT_SECONDS):
     request = urllib.request.Request(url, headers={"User-Agent": "cloud-computing-prj-silver/1.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read().decode("utf-8")
@@ -85,6 +88,36 @@ def fetch_hn_user(username, fetch_fn=None):
         "karma_score": payload.get("karma"),
         "created_at": epoch_to_iso8601(payload.get("created")),
     }
+
+
+def _positive_int_from_env(name, default):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def fetch_hn_users(usernames, fetch_user_fn=None, max_workers=None):
+    usernames = sorted(set(usernames))
+    if not usernames:
+        return {}
+
+    max_workers = max_workers or _positive_int_from_env("HN_USER_FETCH_WORKERS", DEFAULT_HN_USER_FETCH_WORKERS)
+    max_workers = min(max_workers, len(usernames))
+
+    profiles = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_username = {
+            executor.submit(fetch_hn_user, username, fetch_user_fn): username for username in usernames
+        }
+        for future in as_completed(future_to_username):
+            username = future_to_username[future]
+            try:
+                profiles[username] = future.result()
+            except Exception:
+                profiles[username] = {"karma_score": None, "created_at": None}
+    return profiles
 
 
 def build_user_row(username, profile):
@@ -109,12 +142,8 @@ def normalize_hackernews_items(items, fetch_user_fn=None):
         posts.append(item_to_post_row(item))
         usernames.add(item["by"])
 
-    users = []
-    cache = {}
-    for username in sorted(usernames):
-        if username not in cache:
-            cache[username] = fetch_hn_user(username, fetch_fn=fetch_user_fn)
-        users.append(build_user_row(username, cache[username]))
+    profiles = fetch_hn_users(usernames, fetch_user_fn=fetch_user_fn)
+    users = [build_user_row(username, profiles[username]) for username in sorted(usernames)]
 
     return posts, users
 

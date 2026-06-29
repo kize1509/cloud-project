@@ -15,6 +15,8 @@ def lambda_handler(event, context):
     from s3_events import extract_s3_objects  # noqa: E402
     from silver_io import read_silver_for_date  # noqa: E402
 
+    current_key = None
+    current_date = None
     try:
         bucket = os.environ["DATA_LAKE_BUCKET"]
         objects = extract_s3_objects(event or {})
@@ -24,11 +26,13 @@ def lambda_handler(event, context):
         results = []
         seen_dates = set()
         for source_bucket, key in objects:
+            current_key = key
             if source_bucket != bucket:
                 raise ValueError(f"unexpected bucket {source_bucket}; expected {bucket}")
 
             partition = parse_silver_posts_key(key)
             date_key = partition["date"]
+            current_date = date_key
             if date_key in seen_dates:
                 continue
             seen_dates.add(date_key)
@@ -53,7 +57,12 @@ def lambda_handler(event, context):
         return {"results": results}
     except Exception as exc:
         try:
-            notify_failure(f"Gold transformation failed: {exc}")
+            notify_failure(
+                "gold",
+                "gold-transform",
+                exc,
+                {"source_key": current_key, "date": current_date},
+            )
         except Exception as notify_exc:
             print(f"failed to send Discord notification: {notify_exc}")
         raise

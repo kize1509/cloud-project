@@ -174,6 +174,7 @@ def lambda_handler(event, context):
     from parquet_io import read_json_from_s3, write_posts_dataset, write_users_partition  # noqa: E402
     from s3_events import extract_s3_objects  # noqa: E402
 
+    current_key = None
     try:
         bucket = os.environ["DATA_LAKE_BUCKET"]
         objects = extract_s3_objects(event or {})
@@ -182,6 +183,7 @@ def lambda_handler(event, context):
 
         results = []
         for source_bucket, key in objects:
+            current_key = key
             if source_bucket != bucket:
                 raise ValueError(f"unexpected bucket {source_bucket}; expected {bucket}")
             parse_bronze_key(key)
@@ -205,7 +207,7 @@ def lambda_handler(event, context):
         return {"results": results}
     except Exception as exc:
         try:
-            notify_failure(f"Hacker News silver normalization failed: {exc}")
+            notify_failure("silver", "hackernews-normalize", exc, {"source_key": current_key})
         except Exception as notify_exc:
             print(f"failed to send Discord notification: {notify_exc}")
         raise

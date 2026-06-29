@@ -193,14 +193,26 @@ def get_ssm_client():
     return boto3.client("ssm")
 
 
-def notify_failure(message):
+def format_failure_message(stage, job, error, context=None):
+    project = os.environ.get("PROJECT_NAME", "cloud-computing-prj")
+    environment = os.environ.get("ENVIRONMENT", "dev")
+    lines = [f"[{project}][{environment}][{stage}] {job} failed", f"Error: {error}"]
+
+    clean_context = {key: value for key, value in (context or {}).items() if value not in (None, "", [], {})}
+    if clean_context:
+        context_text = " ".join(f"{key}={value}" for key, value in sorted(clean_context.items()))
+        lines.append(f"Context: {context_text}")
+    return "\n".join(lines)
+
+
+def notify_failure(stage, job, error, context=None):
     parameter_name = os.environ.get("DISCORD_WEBHOOK_PARAMETER_NAME", "")
     if not parameter_name:
         return
 
     ssm = get_ssm_client()
     webhook_url = ssm.get_parameter(Name=parameter_name, WithDecryption=True)["Parameter"]["Value"]
-    payload = json.dumps({"content": message}).encode("utf-8")
+    payload = json.dumps({"content": format_failure_message(stage, job, error, context)}).encode("utf-8")
     request = urllib.request.Request(
         webhook_url,
         data=payload,
@@ -212,6 +224,8 @@ def notify_failure(message):
 
 
 def lambda_handler(event, context):
+    target_date = None
+    key = None
     try:
         bucket = os.environ["DATA_LAKE_BUCKET"]
         target_date = resolve_target_date(event)
@@ -235,7 +249,12 @@ def lambda_handler(event, context):
         }
     except Exception as exc:
         try:
-            notify_failure(f"Hacker News bronze ingestion failed: {exc}")
+            notify_failure(
+                "bronze",
+                "hackernews-ingest",
+                exc,
+                {"target_date": target_date.isoformat() if target_date else None, "s3_key": key},
+            )
         except Exception as notify_exc:
             print(f"failed to send Discord notification: {notify_exc}")
         raise
